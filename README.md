@@ -1,6 +1,7 @@
 # Polymarket Bundle Arbitrage Bot
 
-A bundle arbitrage trading bot for Polymarket 15-minute Bitcoin/Ethereum markets, implementing the profitable strategy discovered from analyzing gabagool22's trading patterns.
+A bundle arbitrage trading bot for Polymarket 15-minute Bitcoin/Ethereum markets
+
 
 ## Strategy
 
@@ -10,7 +11,7 @@ A bundle arbitrage trading bot for Polymarket 15-minute Bitcoin/Ethereum markets
 - **No directional risk** - market-neutral hedging
 - **Auto-merge** positions to realize profits immediately
 
-### Key Metrics (from gabagool22 analysis)
+### Key Metrics (from analysis)
 - Target bundle cost: < $0.99
 - Average fills per transaction: ~17
 - Position imbalance: < 10%
