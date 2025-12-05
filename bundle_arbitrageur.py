@@ -33,7 +33,7 @@ from py_clob_client.constants import POLYGON
 
 from config import (
     PRIVATE_KEY, POLYGON_ADDRESS,
-    ENABLE_ONCHAIN_MERGE, ENABLE_ONCHAIN_REDEEM, REDEEM_WINNING_INDEX_SET,
+    ENABLE_ONCHAIN_MERGE, ENABLE_ONCHAIN_REDEEM,
 )
 from chain_client import CTFSettlementClient
 from trade_logger import TradeLogger
@@ -70,6 +70,8 @@ class BundleConfig:
     sweep_interval_ms: float = 5        # Was 10ms, faster execution
     min_order_value: float = 1.0        # Minimum $1 order value
     fills_per_sweep: int = 17           # Target ~16.8 fills (from VWAP analysis)
+    merge_min_hedged: float = 500       # Minimum hedged shares before on-chain merge
+    merge_min_unrealized: float = 10.0  # Minimum unrealized PnL ($) before on-chain merge
     
     # Time-based scoring (early morning has better arbitrage)
     morning_bonus_start: int = 9        # UTC hour
@@ -527,7 +529,7 @@ class DualSideSweeper:
                     size=float(size),
                     side=BUY,
                 ))
-                return self.client.post_order(order, OrderType.FOK)
+                return self.client.post_order(order, OrderType.IOC)
             
             resp = await asyncio.to_thread(_create_and_post)
             
@@ -903,6 +905,10 @@ class BundleArbitrageur:
         """
         hedged = self.position.hedged_shares
         if hedged <= 0 or self.position.bundle_cost >= 1.0:
+            return 0.0
+
+        # Respect merge thresholds to avoid spamming on-chain txs
+        if hedged < self.config.merge_min_hedged and self.position.unrealized_pnl < self.config.merge_min_unrealized:
             return 0.0
 
         if self.settlement_client and ENABLE_ONCHAIN_MERGE:

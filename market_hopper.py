@@ -44,7 +44,6 @@ from config import (
     BA_FILLS_PER_SWEEP,
     WS_URL,
     ENABLE_ONCHAIN_REDEEM,
-    REDEEM_WINNING_INDEX_SET,
 )
 from utils import get_target_markets, warm_connections
 from trade_logger import TradeLogger
@@ -179,6 +178,7 @@ class MarketHopper:
         self.last_ws_update: Dict[str, float] = {}
         self.ws_task: Optional[asyncio.Task] = None
         self.ws_connected: bool = False
+        self.last_resolution_check: Dict[str, float] = {}
         
         # Session tracking
         self.session_start: float = time.time()
@@ -380,6 +380,7 @@ class MarketHopper:
         self.markets.clear()
         self.token_side.clear()
         self.last_ws_update.clear()
+        self.last_resolution_check.clear()
         
         # Get BTC market
         btc_markets = get_target_markets(
@@ -576,6 +577,12 @@ class MarketHopper:
 
         self.last_ws_update[label] = time.time()
 
+        # Opportunistically check resolution occasionally (no more than once every 60s per market)
+        now = time.time()
+        if ENABLE_ONCHAIN_REDEEM and (now - self.last_resolution_check.get(label, 0) > 60):
+            self.last_resolution_check[label] = now
+            asyncio.create_task(self._maybe_redeem_if_resolved(label))
+
     def _is_book_stale(self, label: Optional[str], stale_after: float = 2.0) -> bool:
         """Detect if websocket data is stale for a market label."""
         if not label:
@@ -584,6 +591,66 @@ class MarketHopper:
         if ts is None:
             return True
         return (time.time() - ts) > stale_after
+
+    async def _maybe_redeem_if_resolved(self, label: str):
+        """
+        Check if a market is resolved and submit redemption for the winning index set.
+        Uses CLOB market metadata to detect resolution and winner; falls back to skip if unknown.
+        """
+        if not ENABLE_ONCHAIN_REDEEM or not self.clob_client or not self.arbitrageur:
+            return
+        market = self.markets.get(label)
+        if not market or not market.condition_id:
+            return
+        try:
+            market_data = self.clob_client.get_market(market.condition_id)
+        except Exception as e:
+            print(f"[Hopper] ⚠️ Resolution check failed for {label}: {e}")
+            return
+
+        resolved, winner_index = self._extract_resolution(market_data)
+        if not resolved or winner_index is None:
+            return
+
+        try:
+            await self.arbitrageur.redeem_winning_tokens(market.condition_id, [winner_index])
+        except Exception as e:
+            print(f"[Hopper] ⚠️ Redemption failed for {label}: {e}")
+
+    @staticmethod
+    def _extract_resolution(market_data) -> Tuple[bool, Optional[int]]:
+        """
+        Best-effort resolution parsing:
+        - Expect a 'resolved' flag or similar.
+        - Try to infer winning index from token payouts.
+        """
+        if not market_data:
+            return False, None
+
+        resolved = bool(market_data.get("resolved") or market_data.get("isResolved"))
+        if not resolved:
+            return False, None
+
+        tokens = market_data.get("tokens", []) if isinstance(market_data, dict) else getattr(market_data, "tokens", [])
+        winner_index = None
+        for token in tokens:
+            outcome = (token.get("outcome") or token.get("label") or "").upper()
+            payout = token.get("payout") or token.get("payoutNumerator") or token.get("payout_num") or 0
+            # Consider payout > 0 as winner
+            if payout and float(payout) > 0:
+                if outcome in ("YES", "UP"):
+                    winner_index = 1
+                elif outcome in ("NO", "DOWN"):
+                    winner_index = 2
+                else:
+                    # fallback to index_set if present
+                    idx = token.get("index_set") or token.get("indexSet")
+                    if idx:
+                        winner_index = int(idx)
+                if winner_index:
+                    break
+
+        return resolved, winner_index
     
     async def poll_market_data(self):
         """Poll REST APIs for market data (sequential to avoid rate limits)"""

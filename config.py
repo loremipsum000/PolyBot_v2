@@ -163,6 +163,7 @@ PARENT_COLLECTION_ID = "0x000000000000000000000000000000000000000000000000000000
 MERGE_PARTITION = [1, 2]
 MERGE_GAS_LIMIT = 450000
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", str(USDC_DECIMALS)))
-ENABLE_ONCHAIN_MERGE = os.getenv("ENABLE_ONCHAIN_MERGE", "false").lower() == "true"
-ENABLE_ONCHAIN_REDEEM = os.getenv("ENABLE_ONCHAIN_REDEEM", "false").lower() == "true"
-REDEEM_WINNING_INDEX_SET = os.getenv("REDEEM_WINNING_INDEX_SET")  # e.g., "1" for YES, "2" for NO
+ENABLE_ONCHAIN_MERGE = os.getenv("ENABLE_ONCHAIN_MERGE", "true").lower() == "true"
+ENABLE_ONCHAIN_REDEEM = os.getenv("ENABLE_ONCHAIN_REDEEM", "true").lower() == "true"
+# Default winner index set to YES (1); override via env for NO = 2.
+REDEEM_WINNING_INDEX_SET = os.getenv("REDEEM_WINNING_INDEX_SET", "1")
