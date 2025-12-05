@@ -5,7 +5,6 @@ from decimal import Decimal, ROUND_DOWN
 from typing import List, Optional
 
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
 
 from config import (
     PRIVATE_KEY,
@@ -90,8 +89,6 @@ class CTFSettlementClient:
         self.enabled_merge = ENABLE_ONCHAIN_MERGE
         self.enabled_redeem = ENABLE_ONCHAIN_REDEEM
         self.w3 = Web3(Web3.HTTPProvider(RPC_URL))
-        # Polygon requires the PoA middleware for legacy compatibility.
-        self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
         self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
         self.contract = self.w3.eth.contract(
             address=Web3.to_checksum_address(CTF_CONTRACT_ADDRESS),
