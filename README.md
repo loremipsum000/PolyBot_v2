@@ -1,6 +1,20 @@
-# Polymarket Gabagool Bot
+# Polymarket Bundle Arbitrage Bot
 
-A high-frequency volatility arbitrage bot for Polymarket 15-minute Bitcoin/Ethereum markets.
+A bundle arbitrage trading bot for Polymarket 15-minute Bitcoin/Ethereum markets, implementing the profitable strategy discovered from analyzing gabagool22's trading patterns.
+
+## Strategy
+
+**Bundle Arbitrage**: Buy BOTH YES and NO shares for less than $1.00 combined.
+
+- **Guaranteed profit** = `(1.00 - bundle_cost) × min(yes_shares, no_shares)`
+- **No directional risk** - market-neutral hedging
+- **Auto-merge** positions to realize profits immediately
+
+### Key Metrics (from gabagool22 analysis)
+- Target bundle cost: < $0.99
+- Average fills per transaction: ~17
+- Position imbalance: < 10%
+- Best arbitrage windows: 9-11 AM UTC
 
 ## Quick Start
 
@@ -12,48 +26,67 @@ A high-frequency volatility arbitrage bot for Polymarket 15-minute Bitcoin/Ether
    ```
 
 2. **Configure environment:**
-   - Copy `.env.example` to `.env` and fill in your keys.
-   - Optional knobs (momentum thresholds, rolling guard, leash, etc.) are documented in [`docs/TUNING.md`](docs/TUNING.md).
+   - Copy `.env.example` to `.env` and fill in your keys
+   - See [`docs/TUNING.md`](docs/TUNING.md) for configuration options
 
 3. **Run the bot:**
    ```bash
-   # Ethereum 15m markets
-   python main.py
-
-   # Bitcoin 15m markets (optional second instance)
-   python main_btc.py
+   python main_hopper.py 10000  # Run for 10000 fills
    ```
-
-4. **Shadow logger (optional):**
-   ```bash
-   python shadow_listener.py --market btc-updown-15m-1764871200 --output data/btc-trades.log
-   ```
-   Use this telemetry to tune the adaptive triggers before going live.
-
-## AWS Deployment
-
-See `DEPLOYMENT.md` for detailed AWS deployment instructions.
 
 ## Architecture
 
-- **Hot Path (Sniper)**: Low-latency WebSocket listener for price updates
-- **Cold Path (Strategist)**: Market discovery, order signing, position management
-- **Blockchain Monitor**: Polygon RPC integration for merging positions
-- **Shadow Listener** *(optional)*: Records live fills for heatmap-style analysis
+```
+main_hopper.py          # Entry point
+├── market_hopper.py    # Multi-market coordination (BTC + ETH)
+├── bundle_arbitrageur.py  # Core arbitrage strategy
+├── trade_logger.py     # Trade logging & P&L tracking
+├── utils.py            # Market discovery & HTTP pooling
+└── config.py           # Configuration parameters
+```
 
-## Strategy
+### Core Components
 
-The bot implements the "Gabagool" strategy:
-- Scans for active 15-minute BTC/ETH markets
-- Places pre-signed limit orders on both YES and NO sides
-- Adaptive combined guard tightens/loosens based on volatility
-- Optional single-side momentum traps mirror @gabagool22-style sweeps
-- Merges positions to recycle capital
+- **MarketHopper**: Monitors both BTC and ETH 15-minute markets, switches focus based on opportunity score
+- **BundleArbitrageur**: Executes dual-side sweeps (buy YES + NO), maintains position balance
+- **Connection Pooling**: HTTP session with keep-alive for ~40% faster API calls
+
+## AWS Deployment
+
+```bash
+# Stop existing service
+ssh -i poly-bot.pem ubuntu@YOUR_EC2_IP "sudo systemctl stop gabagool"
+
+# Upload files
+scp -i poly-bot.pem *.py ubuntu@YOUR_EC2_IP:~/gabagool-bot/
+
+# Restart service
+ssh -i poly-bot.pem ubuntu@YOUR_EC2_IP "sudo systemctl restart gabagool"
+
+# Watch logs
+ssh -i poly-bot.pem ubuntu@YOUR_EC2_IP "sudo journalctl -u gabagool -f"
+```
 
 ## Testing
 
-Run connectivity tests before deployment:
 ```bash
-python test_connectivity.py
-python test_websocket_market.py
+# Run bundle arbitrage unit tests
+python test_bundle_arbitrage.py
 ```
+
+## Configuration
+
+Key parameters in `config.py`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `BA_MAX_BUNDLE_COST` | 0.99 | Max bundle cost to enter |
+| `BA_MAX_IMBALANCE` | 0.10 | Max position imbalance (10%) |
+| `BA_FILLS_PER_SWEEP` | 17 | Target fills per sweep |
+| `BA_ORDER_SIZE` | 16 | Shares per order |
+
+See [`docs/TUNING.md`](docs/TUNING.md) for all configuration options.
+
+## License
+
+MIT

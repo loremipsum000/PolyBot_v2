@@ -5,7 +5,74 @@ import dateutil.parser  # type: ignore
 from config import REST_URL
 
 GAMMA_URL = "https://gamma-api.polymarket.com/events"
+CLOB_URL = "https://clob.polymarket.com"
 EASTERN = ZoneInfo("America/New_York")
+
+# =============================================================================
+# CONNECTION POOLING - Shared session with keep-alive for faster HTTP requests
+# This eliminates TCP/TLS handshake overhead on subsequent requests
+# =============================================================================
+
+# Create a shared session with connection pooling
+_http_session = None
+
+def get_http_session() -> requests.Session:
+    """
+    Get or create a shared HTTP session with connection pooling.
+    
+    Benefits:
+    - Reuses TCP connections (avoids 50-100ms per new connection)
+    - Keeps TLS sessions alive (avoids TLS handshake overhead)
+    - Connection pool with keep-alive for multiple hosts
+    """
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        
+        # Configure connection pool
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,      # Number of connection pools to cache
+            pool_maxsize=20,          # Max connections per pool
+            max_retries=3,            # Retry failed connections
+        )
+        _http_session.mount('https://', adapter)
+        _http_session.mount('http://', adapter)
+        
+        # Set headers for keep-alive
+        _http_session.headers.update({
+            'Connection': 'keep-alive',
+            'Accept': 'application/json',
+        })
+        
+        print("[HTTP] 🔌 Connection pool initialized (pool_size=20, keep-alive=True)")
+    
+    return _http_session
+
+
+def warm_connections():
+    """
+    Pre-warm HTTP connections to Polymarket APIs.
+    
+    Call this at startup to establish connections before trading.
+    Eliminates cold-start latency on first real requests.
+    """
+    session = get_http_session()
+    
+    print("[HTTP] 🔥 Pre-warming connections...")
+    
+    endpoints = [
+        (f"{CLOB_URL}/time", "CLOB"),
+        (f"{GAMMA_URL}?limit=1", "Gamma"),
+    ]
+    
+    for url, name in endpoints:
+        try:
+            resp = session.get(url, timeout=5)
+            print(f"[HTTP] ✅ {name} warmed ({resp.status_code}, {resp.elapsed.total_seconds()*1000:.0f}ms)")
+        except Exception as e:
+            print(f"[HTTP] ⚠️ {name} warm failed: {e}")
+    
+    print("[HTTP] 🔥 Connections pre-warmed")
 
 def get_target_markets(
     specific_slug=None,
@@ -51,17 +118,19 @@ def get_target_markets(
         except Exception:
             return False
 
-    def normalize_market_stub(slug, question, condition_id=None):
+    def normalize_market_stub(slug, question, condition_id=None, end_date=None):
         return [{
             "market_slug": slug,
             "condition_id": condition_id,
-            "question": question or slug
+            "question": question or slug,
+            "end_date_iso": end_date
         }]
 
     def fetch_from_clob(slug):
         print(f"{tag} Checking CLOB slug: {slug}...")
         try:
-            resp = requests.get(f"{REST_URL}/markets/{slug}")
+            session = get_http_session()
+            resp = session.get(f"{REST_URL}/markets/{slug}")
             if resp.status_code == 200:
                 data = resp.json()
                 market = data[0] if isinstance(data, list) else data
@@ -78,7 +147,8 @@ def get_target_markets(
     def fetch_from_gamma(slug):
         print(f"{tag} Checking Gamma for event slug: {slug}...")
         try:
-            resp = requests.get(GAMMA_URL, params={"slug": slug})
+            session = get_http_session()
+            resp = session.get(GAMMA_URL, params={"slug": slug})
             if resp.status_code != 200:
                 print(f"{tag} ❌ Gamma slug {slug} not found (status {resp.status_code})")
                 return None
@@ -98,8 +168,9 @@ def get_target_markets(
             resolved_slug = market.get("slug") or slug
             condition_id = market.get("conditionId") or market.get("condition_id")
             question = market.get("question") or event.get("title")
+            end_date = market.get("endDate") or event.get("endDate")
             print(f"{tag} 🎯 Gamma target: {question} (slug: {resolved_slug})")
-            return normalize_market_stub(resolved_slug, question, condition_id)
+            return normalize_market_stub(resolved_slug, question, condition_id, end_date)
         except Exception as e:
             print(f"{tag} Gamma fetch error for {slug}: {e}")
             return None
@@ -138,7 +209,8 @@ def get_target_markets(
     # 3. Legacy scan fallback (often stale, but harmless to try)
     print(f"{tag} 🔄 Legacy fallback scan...")
     try:
-        resp = requests.get(
+        session = get_http_session()
+        resp = session.get(
             f"{REST_URL}/markets",
             params={
                 "active": "true",

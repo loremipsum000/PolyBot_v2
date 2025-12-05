@@ -1,10 +1,37 @@
+# Environment
 .env
-__pycache__/
-*.pyc
-
 venv/
+.venv/
+
+# Python
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+
+# Secrets
 *.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data & Logs
 data/
+*.log
+*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
