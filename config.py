@@ -16,7 +16,7 @@ WS_URL = "wss://ws-live-data.polymarket.com"
 
 # --- POLYGON CHAIN ---
 CHAIN_ID = 137
-RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/sz8XTC13sVocHnsmQq9_R"
+RPC_URL = os.getenv("ALCHEMY_RPC_URL")
 
 # --- STRATEGY SETTINGS ---
 MAX_PAIR_COST = float(os.getenv("MAX_PAIR_COST", "1.0"))
@@ -48,8 +48,9 @@ BA_MIN_POSITION_SIZE = float(os.getenv("BA_MIN_POSITION_SIZE", "100"))   # Don't
 BA_MAX_TOTAL_EXPOSURE = float(os.getenv("BA_MAX_TOTAL_EXPOSURE", "2000")) # Max capital at risk
 
 # Entry Price Thresholds (WIDENED based on actual price ranges $0.09-$0.91)
-BA_MAX_YES_PRICE = float(os.getenv("BA_MAX_YES_PRICE", "0.85"))          # Was 0.75, widened (he buys up to $0.91)
-BA_MAX_NO_PRICE = float(os.getenv("BA_MAX_NO_PRICE", "0.45"))            # Was 0.35, widened (he buys up to $0.89)
+BA_MAX_YES_PRICE = float(os.getenv("BA_MAX_YES_PRICE", "0.92"))          # He pays up to ~0.91 on strong side
+BA_MAX_NO_PRICE = float(os.getenv("BA_MAX_NO_PRICE", "0.30"))            # Require a cheap hedge leg (observed 0.02-0.29)
+BA_CHEAP_SIDE_THRESHOLD = float(os.getenv("BA_CHEAP_SIDE_THRESHOLD", "0.30"))  # At least one side must be <= this
 
 # Execution (avg 16.8 fills per transaction - AGGRESSIVE multi-fill)
 BA_SWEEP_BURST_SIZE = int(os.getenv("BA_SWEEP_BURST_SIZE", "20"))        # Orders per burst wave
