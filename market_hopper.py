@@ -796,9 +796,9 @@ class MarketHopper:
                 
                 if time_remaining < 30:
                     print(f"[Hopper] ⚠️ {label} market expires in {time_remaining:.0f}s")
-                    if ENABLE_ONCHAIN_REDEEM and REDEEM_WINNING_INDEX_SET and self.arbitrageur:
+                    if ENABLE_ONCHAIN_REDEEM and  and self.arbitrageur:
                         try:
-                            winner_idx = int(REDEEM_WINNING_INDEX_SET)
+                            winner_idx = int()
                             asyncio.create_task(
                                 self.arbitrageur.redeem_winning_tokens(
                                     market.condition_id, [winner_idx]
