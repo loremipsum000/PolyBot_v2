@@ -184,12 +184,25 @@ class MakerStrategy:
         if not order_ids:
             return
 
+        # Prefer batch cancel; fall back to per-order cancel variants.
         try:
-            for oid in order_ids:
-                # Cancel individually to match client signature
-                self.clob_client.cancel_order(order_id=oid)
-        except Exception as e:
-            print(f"[Maker] ⚠️ Error cancelling orders: {e}")
+            if hasattr(self.clob_client, "cancel_orders"):
+                self.clob_client.cancel_orders(order_ids=order_ids)
+                return
+        except Exception:
+            pass
+
+        for oid in order_ids:
+            try:
+                if hasattr(self.clob_client, "cancel_order"):
+                    self.clob_client.cancel_order(order_id=oid)
+                elif hasattr(self.clob_client, "cancel"):
+                    # Some client versions expose `cancel(order_id=...)`
+                    self.clob_client.cancel(order_id=oid)
+                else:
+                    raise AttributeError("No cancel method available on client")
+            except Exception as e:
+                print(f"[Maker] ⚠️ Cancel fallback failed for {oid}: {e}")
 
     def _should_replace(self, token_id: str, new_price: float) -> bool:
         """Decide if we should replace an existing quote based on price delta."""
@@ -208,7 +221,9 @@ class MakerStrategy:
 
     async def update_market_books(self):
         """Fetch latest orderbook depth"""
-        for label, market in self.markets.items():
+        to_remove: List[str] = []
+
+        for label, market in list(self.markets.items()):
             try:
                 yes_book = self.clob_client.get_order_book(market.yes_token)
                 no_book = self.clob_client.get_order_book(market.no_token)
@@ -221,6 +236,16 @@ class MakerStrategy:
                 print(f"[Maker] {label} Book: YES {market.best_bid_yes:.2f}/{market.best_ask_yes:.2f} | NO {market.best_bid_no:.2f}/{market.best_ask_no:.2f} (ImpProb: {market.implied_probability:.2f})")
             except Exception as e:
                 print(f"[Maker] ⚠️ Error updating book for {label}: {e}")
+                if "No orderbook exists" in str(e):
+                    to_remove.append(label)
+
+        if to_remove:
+            for label in to_remove:
+                market = self.markets.get(label)
+                if market:
+                    await self.cancel_all_orders([market.yes_token, market.no_token])
+                self.markets.pop(label, None)
+                print(f"[Maker] ❌ Dropping {label} - orderbook missing/expired")
 
     def calculate_my_bids(self, market: MarketData, asset_label: str) -> Tuple[Optional[float], Optional[float]]:
         """
@@ -329,7 +354,7 @@ class MakerStrategy:
                 try:
                     for o in orders_to_place:
                         order = self.clob_client.create_order(o)
-                        resp = self.clob_client.post_order(order, OrderType.GTC)
+                        resp = self.clob_client.post_order(order, orderType=OrderType.GTC)
                         oid = None
                         if isinstance(resp, dict):
                             oid = resp.get('orderID') or resp.get('id')

@@ -1,0 +1,60 @@
+"""
+One-time USDC approval for Polymarket CLOB.
+Run on the host with env/CONFIG loaded so RPC_URL, CHAIN_ID, PRIVATE_KEY are available.
+"""
+
+import json
+import os
+from dotenv import load_dotenv
+from web3 import Web3
+from web3.middleware import geth_poa_middleware
+
+load_dotenv()
+
+# Local config values; fallback to env if config not present
+try:
+    from config import RPC_URL, CHAIN_ID, PRIVATE_KEY
+except Exception:
+    RPC_URL = os.getenv("RPC_URL") or os.getenv("ALCHEMY_RPC_URL")
+    CHAIN_ID = int(os.getenv("CHAIN_ID") or "137")
+    PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+
+if not RPC_URL or not PRIVATE_KEY:
+    raise SystemExit("RPC_URL and PRIVATE_KEY are required.")
+
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
+w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+account = w3.eth.account.from_key(PRIVATE_KEY)
+
+# USDC (Polygon)
+USDC_ADDRESS = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+# Polymarket CLOB spender (CTF Exchange)
+SPENDER = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
+
+USDC_ABI = json.loads(
+    '[{"constant":false,"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"type":"function"}]'
+)
+
+usdc = w3.eth.contract(address=USDC_ADDRESS, abi=USDC_ABI)
+
+def main():
+    nonce = w3.eth.get_transaction_count(account.address)
+    gas_price = w3.eth.gas_price
+    tx = usdc.functions.approve(SPENDER, 2**256 - 1).build_transaction(
+        {
+            "from": account.address,
+            "nonce": nonce,
+            "gasPrice": gas_price,
+            "chainId": CHAIN_ID,
+        }
+    )
+
+    signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    print(f"✅ Approval submitted. Tx: {tx_hash.hex()}")
+
+
+if __name__ == "__main__":
+    main()
+
