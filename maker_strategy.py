@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import contextlib
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -40,6 +41,8 @@ class MarketData:
     condition_id: str
     yes_token: str
     no_token: str
+    end_date_iso: str = ""
+    strike_price: Optional[float] = None
     best_bid_yes: float = 0.0
     best_ask_yes: float = 0.0
     best_bid_no: float = 0.0
