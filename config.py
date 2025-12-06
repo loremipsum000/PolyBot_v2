@@ -38,7 +38,7 @@ STRATEGY_TYPE = os.getenv("STRATEGY_TYPE", "BUNDLE").upper()  # "BUNDLE" (recomm
 # - Realized ROI: +3.12% on $3,066 invested
 
 # Bundle Cost Thresholds (UPDATED based on actual VWAP data)
-BA_MAX_BUNDLE_COST = float(os.getenv("BA_MAX_BUNDLE_COST", "1.005"))      # Relaxed for A/B fills
+BA_MAX_BUNDLE_COST = float(os.getenv("BA_MAX_BUNDLE_COST", "0.99"))      # Default stays strict; override in .env for A/B
 BA_TARGET_BUNDLE_COST = float(os.getenv("BA_TARGET_BUNDLE_COST", "0.985"))  # Was 0.97, realistic target
 BA_ABORT_BUNDLE_COST = float(os.getenv("BA_ABORT_BUNDLE_COST", "0.995"))   # Tighter - losses happen >1.00
 
@@ -50,7 +50,7 @@ BA_MAX_TOTAL_EXPOSURE = float(os.getenv("BA_MAX_TOTAL_EXPOSURE", "2000")) # Max 
 # Entry Price Thresholds (WIDENED based on actual price ranges $0.09-$0.91)
 BA_MAX_YES_PRICE = float(os.getenv("BA_MAX_YES_PRICE", "0.92"))          # He pays up to ~0.91 on strong side
 BA_MAX_NO_PRICE = float(os.getenv("BA_MAX_NO_PRICE", "0.30"))            # Require a cheap hedge leg (observed 0.02-0.29)
-BA_CHEAP_SIDE_THRESHOLD = float(os.getenv("BA_CHEAP_SIDE_THRESHOLD", "0.99"))  # Relaxed for A/B fills
+BA_CHEAP_SIDE_THRESHOLD = float(os.getenv("BA_CHEAP_SIDE_THRESHOLD", "0.30"))  # Default stays strict; override in .env for A/B
 
 # Execution (avg 16.8 fills per transaction - AGGRESSIVE multi-fill)
 BA_SWEEP_BURST_SIZE = int(os.getenv("BA_SWEEP_BURST_SIZE", "20"))        # Orders per burst wave

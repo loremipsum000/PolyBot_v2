@@ -19,6 +19,7 @@ from config import (
 )
 from utils import get_target_markets, warm_connections, get_http_session
 from binance_client import BinanceFeed
+from binance_ohlc import get_open_price_at_ts
 from pricing_engine import calculate_fair_probability, get_time_to_expiry
 
 # Load env so MAKER_* are populated
@@ -31,6 +32,7 @@ MAKER_MIN_SPREAD = float(os.getenv("MAKER_MIN_SPREAD", "0.01"))          # Min s
 MAKER_TICK_SIZE = 0.01                                                   # Polymarket tick size
 MAKER_REFRESH_INTERVAL = 2.0                                             # How often to re-evaluate orders (seconds)
 MAKER_PRICE_DELTA = float(os.getenv("MAKER_PRICE_DELTA", "0.01"))        # Move/cancel threshold
+MAKER_VOL = float(os.getenv("MAKER_VOL", "0.6"))                         # Annualized vol for fair pricing
 
 @dataclass
 class MarketData:
@@ -120,10 +122,20 @@ class MakerStrategy:
                     elif outcome in ['NO', 'DOWN']: no_id = tid
                 
                 if yes_id and no_id:
-                    # Strike = spot at discovery (preferred), fallback to None
+                    end_iso = m.get('end_date_iso') or m.get('endDate') or ""
+                    start_ts = None
+                    if end_iso:
+                        try:
+                            from datetime import datetime, timezone, timedelta
+                            end = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+                            start_ts = int((end - timedelta(minutes=15)).timestamp())
+                        except Exception:
+                            start_ts = None
+
                     strike = None
-                    if self.binance_feed:
-                        strike = self.binance_feed.get_price(label)
+                    if start_ts:
+                        symbol = "BTCUSDT" if label == "BTC" else "ETHUSDT"
+                        strike = get_open_price_at_ts(symbol, start_ts)
 
                     self.markets[label] = MarketData(
                         slug=m.get('market_slug'),
@@ -131,7 +143,7 @@ class MakerStrategy:
                         yes_token=yes_id,
                         no_token=no_id,
                         strike_price=strike,
-                        end_date_iso=m.get('end_date_iso') or m.get('endDate') or ""
+                        end_date_iso=end_iso
                     )
                     print(f"[Maker]    Tokens: YES={yes_id[:10]}... NO={no_id[:10]}... Strike={strike}")
                 else:
@@ -198,7 +210,11 @@ class MakerStrategy:
         if not ref_price:
             return 0.0, 0.0
 
-        strike = market.strike_price or ref_price  # strike at discovery or fallback to ref
+        # Require strike; if missing, do not quote.
+        if not market.strike_price:
+            return 0.0, 0.0
+
+        strike = market.strike_price
         t_years = get_time_to_expiry(market.end_date_iso)
         # Compute fair probability from external price
         fair_prob = calculate_fair_probability(ref_price, strike, t_years, volatility=MAKER_VOL)
@@ -302,6 +318,13 @@ class MakerStrategy:
         # Start Binance feed
         self.binance_feed = BinanceFeed()
         feed_task = asyncio.create_task(self.binance_feed.start())
+
+        # Wait for feed readiness
+        for _ in range(15):
+            if self.binance_feed.get_price("BTC") and self.binance_feed.get_price("ETH"):
+                break
+            print("[Maker] Waiting for Binance feed...")
+            await asyncio.sleep(1)
 
         await self.discover_markets()
         
