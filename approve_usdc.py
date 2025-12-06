@@ -7,7 +7,16 @@ import json
 import os
 from dotenv import load_dotenv
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
+try:
+    # web3 <7
+    from web3.middleware import geth_poa_middleware
+    def _inject_poa(w3: Web3):
+        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+except ImportError:
+    # web3 >=7
+    from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
+    def _inject_poa(w3: Web3):
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
 load_dotenv()
 
@@ -23,7 +32,7 @@ if not RPC_URL or not PRIVATE_KEY:
     raise SystemExit("RPC_URL and PRIVATE_KEY are required.")
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
-w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+_inject_poa(w3)
 
 account = w3.eth.account.from_key(PRIVATE_KEY)
 
