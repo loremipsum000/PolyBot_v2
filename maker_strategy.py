@@ -28,7 +28,7 @@ load_dotenv()
 
 # --- MAKER CONFIGURATION ---
 MAKER_MAX_BUNDLE_COST = float(os.getenv("MAKER_MAX_BUNDLE_COST", "0.99"))  # Max combined cost we are willing to pay
-MAKER_ORDER_SIZE = float(os.getenv("MAKER_ORDER_SIZE", "50.0"))          # Size of our limit orders
+MAKER_ORDER_SIZE = float(os.getenv("MAKER_ORDER_SIZE", "25.0"))          # Size of our limit orders (default halved)
 MAKER_MIN_SPREAD = float(os.getenv("MAKER_MIN_SPREAD", "0.01"))          # Min spread we want to capture
 MAKER_TICK_SIZE = 0.01                                                   # Polymarket tick size
 MAKER_REFRESH_INTERVAL = 2.0                                             # How often to re-evaluate orders (seconds)
