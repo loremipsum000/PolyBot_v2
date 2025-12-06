@@ -6,7 +6,7 @@ import threading
 import contextlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
@@ -20,7 +20,8 @@ from config import (
     BTC_SLUG_PREFIX, ETH_SLUG_PREFIX,
     WS_URL,
     CHAIN_ID,
-    RPC_URL
+    RPC_URL,
+    PAPER_TRADING,
 )
 from utils import get_target_markets, warm_connections, get_http_session
 from binance_client import BinanceFeed
@@ -70,24 +71,57 @@ class MarketData:
         return mid_yes / total
 
 
+@dataclass
+class QuoteContext:
+    ref_price: Optional[float] = None
+    strike: Optional[float] = None
+    t_years: Optional[float] = None
+    fair_prob: Optional[float] = None
+    vol: float = MAKER_VOL
+    bid_yes_raw: float = 0.0
+    bid_no_raw: float = 0.0
+    bid_yes: float = 0.0
+    bid_no: float = 0.0
+    bundle_sum_raw: float = 0.0
+    bundle_sum_capped: float = 0.0
+    adjustments: Dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
 class MakerJsonLogger:
     """
     Comprehensive JSONL logger for maker events.
     Writes to data/maker_logs/maker_session_<ts>.jsonl
     """
 
-    def __init__(self, log_dir: str = "data/maker_logs"):
+    def __init__(self, log_dir: str = "data/maker_logs", *, paper_trading: bool = False):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self.session_file = self.log_dir / f"maker_session_{self.session_id}.jsonl"
         self._lock = threading.Lock()
+        self.paper_trading = paper_trading
         self.log({"event_type": "session_start"})
+        self.log({
+            "event_type": "session_config",
+            "maker_params": {
+                "max_bundle_cost": MAKER_MAX_BUNDLE_COST,
+                "order_size": MAKER_ORDER_SIZE,
+                "min_spread": MAKER_MIN_SPREAD,
+                "tick_size": MAKER_TICK_SIZE,
+                "refresh_interval": MAKER_REFRESH_INTERVAL,
+                "price_delta": MAKER_PRICE_DELTA,
+                "vol": MAKER_VOL,
+            },
+        })
 
     def log(self, record: Dict):
         rec = record.copy()
         rec.setdefault("ts", int(time.time()))
         rec.setdefault("session_id", self.session_id)
+        rec.setdefault("paper_trading", self.paper_trading)
         try:
             with self._lock:
                 with open(self.session_file, "a") as f:
@@ -101,6 +135,7 @@ class MakerStrategy:
         self.markets: Dict[str, MarketData] = {}  # 'BTC', 'ETH' -> MarketData
         self.open_orders: Dict[str, List[str]] = {} # token_id -> list of order_ids
         self.last_quotes: Dict[str, float] = {}     # token_id -> last quoted price
+        self.paper_trading: bool = PAPER_TRADING
         # Simple inventory tracking per asset
         self.position: Dict[str, Dict[str, float]] = {  # label -> {'YES': sh, 'NO': sh}
             'BTC': {'YES': 0.0, 'NO': 0.0},
@@ -108,7 +143,7 @@ class MakerStrategy:
         }
         self.running = True
         self.binance_feed: Optional[BinanceFeed] = None
-        self.event_logger = MakerJsonLogger(log_dir="data/maker_logs")
+        self.event_logger = MakerJsonLogger(log_dir="data/maker_logs", paper_trading=self.paper_trading)
 
     def init_client(self):
         print("[Maker] 🔐 Initializing CLOB client...")
@@ -122,6 +157,8 @@ class MakerStrategy:
         creds = self.clob_client.create_or_derive_api_creds()
         self.clob_client.set_api_creds(creds)
         print(f"[Maker] ✅ Authenticated (Addr: {POLYGON_ADDRESS})")
+        if self.paper_trading:
+            print("[Maker] 🧪 PAPER TRADING MODE: orders will NOT be sent to CLOB.")
 
     async def discover_markets(self):
         print("[Maker] 🔍 Discovering 15m markets...")
@@ -236,6 +273,16 @@ class MakerStrategy:
             order_ids.extend(self.open_orders.get(tid, []))
             self.open_orders.pop(tid, None)
 
+        # In paper mode, just clear and log.
+        if self.paper_trading:
+            if order_ids:
+                self.event_logger.log({
+                    "event_type": "paper_cancel",
+                    "order_ids": order_ids,
+                    "token_ids": token_ids,
+                })
+            return
+
         if not order_ids:
             return
 
@@ -246,7 +293,7 @@ class MakerStrategy:
                 return
         except Exception:
             pass
-
+        
         for oid in order_ids:
             try:
                 if hasattr(self.clob_client, "cancel_order"):
@@ -312,7 +359,7 @@ class MakerStrategy:
                     "reason": "orderbook_missing",
                 })
 
-    def calculate_my_bids(self, market: MarketData, asset_label: str) -> Tuple[Optional[float], Optional[float]]:
+    def calculate_my_bids(self, market: MarketData, asset_label: str) -> Tuple[Optional[float], Optional[float], QuoteContext]:
         """
         Calculate optimal bid prices.
         Strategy:
@@ -322,28 +369,37 @@ class MakerStrategy:
         4. Ensure we are not crossing the spread (taking liquidity) unless intended (here we are Makers).
         5. Optimize: Try to be Best Bid if it's "cheap enough", otherwise just sit at our max value.
         """
+        ctx = QuoteContext()
         
         # External price feed (Binance). If unavailable, skip quoting.
         ref_price = self.binance_feed.get_price(asset_label) if self.binance_feed else None
+        ctx.ref_price = ref_price
         if not ref_price:
-            return 0.0, 0.0
-
+            return 0.0, 0.0, ctx
+        
         # Require strike; if missing, fall back to live price to keep the bot quoting in tests.
         strike = market.strike_price
         if not strike and ref_price:
             strike = ref_price
+            ctx.adjustments["strike_source"] = "binance_fallback"
             market.strike_price = strike
             print(f"[Maker] ⚠️ {asset_label}: Strike missing; using live price {strike:.2f} as fallback")
         if not strike:
-            return 0.0, 0.0
-
+            return 0.0, 0.0, ctx
+        
         t_years = get_time_to_expiry(market.end_date_iso)
+        ctx.strike = strike
+        ctx.t_years = t_years
         # Compute fair probability from external price
         fair_prob = calculate_fair_probability(ref_price, strike, t_years, volatility=MAKER_VOL)
-
+        ctx.fair_prob = fair_prob
+        
         # Add maker edge: quote inside fair by MIN_SPREAD
         bid_yes = max(0.0, round(fair_prob - MAKER_MIN_SPREAD, 2))
         bid_no = max(0.0, round((1.0 - fair_prob) - MAKER_MIN_SPREAD, 2))
+        ctx.bid_yes_raw = bid_yes
+        ctx.bid_no_raw = bid_no
+        ctx.bundle_sum_raw = round(bid_yes + bid_no, 4)
         
         # Safety checks
         if bid_yes <= 0.01: bid_yes = 0.0
@@ -364,19 +420,27 @@ class MakerStrategy:
             bid_no = max(0.0, min(bid_no, market.best_bid_no - MAKER_TICK_SIZE))
         
         # Final bundle safety: don't exceed max bundle with current best asks
-        if (bid_yes + bid_no) > MAKER_MAX_BUNDLE_COST:
-            scale = MAKER_MAX_BUNDLE_COST / max(0.01, bid_yes + bid_no)
+        bundle_sum = bid_yes + bid_no
+        if bundle_sum > MAKER_MAX_BUNDLE_COST:
+            scale = MAKER_MAX_BUNDLE_COST / max(0.01, bundle_sum)
             bid_yes = round(bid_yes * scale, 2)
             bid_no = round(bid_no * scale, 2)
+            ctx.adjustments["bundle_scale"] = round(scale, 4)
         
-        return bid_yes, bid_no
+        ctx.bid_yes = bid_yes
+        ctx.bid_no = bid_no
+        ctx.bundle_sum_capped = round(bid_yes + bid_no, 4)
+        
+        return bid_yes, bid_no, ctx
 
     async def manage_orders(self):
         """Place or update orders (batched, with replace-on-delta and simple inventory skew)"""
         for label, market in self.markets.items():
-            target_yes, target_no = self.calculate_my_bids(market, label)
+            target_yes, target_no, quote_ctx = self.calculate_my_bids(market, label)
 
             # Simple inventory skew: if long YES, shade YES down and NO up; vice versa
+            pre_inventory_yes = target_yes
+            pre_inventory_no = target_no
             pos_yes = self.position.get(label, {}).get('YES', 0.0)
             pos_no = self.position.get(label, {}).get('NO', 0.0)
             imbalance = pos_yes - pos_no
@@ -386,6 +450,13 @@ class MakerStrategy:
             elif imbalance < 0:  # long NO
                 target_no = max(0.0, target_no - MAKER_TICK_SIZE)
                 target_yes = round(min(0.99, target_yes + MAKER_TICK_SIZE), 2)
+
+            quote_ctx.adjustments["inventory_skew"] = round(imbalance, 4)
+            quote_ctx.bid_yes = target_yes
+            quote_ctx.bid_no = target_no
+            quote_ctx.bundle_sum_capped = round(target_yes + target_no, 4)
+            quote_ctx.adjustments["inventory_yes_delta"] = round(target_yes - pre_inventory_yes, 4)
+            quote_ctx.adjustments["inventory_no_delta"] = round(target_no - pre_inventory_no, 4)
 
             # Log planned quotes and current book/position
             self.event_logger.log({
@@ -410,6 +481,7 @@ class MakerStrategy:
                     "yes": self.position.get(label, {}).get('YES', 0.0),
                     "no": self.position.get(label, {}).get('NO', 0.0),
                 },
+                "pricing": quote_ctx.to_dict(),
             })
 
             orders_to_place = []
@@ -443,6 +515,20 @@ class MakerStrategy:
                 print(f"[Maker] 💸 {label}: Bids YES@{target_yes:.2f}, NO@{target_no:.2f} (Sum: {fair})")
                 try:
                     for o in orders_to_place:
+                        if self.paper_trading:
+                            oid = f"paper-{int(time.time()*1000)}"
+                            self._record_quote(o.token_id, o.price, oid)
+                            self.event_logger.log({
+                                "event_type": "paper_order",
+                                "label": label,
+                                "token_id": o.token_id,
+                                "price": o.price,
+                                "size": o.size,
+                                "side": "BUY",
+                                "order_id": oid,
+                            })
+                            continue
+
                         order = self.clob_client.create_order(o)
                         resp = self.clob_client.post_order(order, orderType=OrderType.GTC)
                         oid = None
@@ -484,6 +570,9 @@ class MakerStrategy:
                 break
             print("[Maker] Waiting for Binance feed...")
             await asyncio.sleep(1)
+
+        if self.paper_trading:
+            print("[Maker] PAPER MODE: reading live books/prices, not posting orders.")
 
         await self.discover_markets()
         
