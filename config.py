@@ -9,10 +9,14 @@ POLYGON_ADDRESS = os.getenv("POLYGON_ADDRESS")
 API_KEY = os.getenv("CLOB_API_KEY")
 API_SECRET = os.getenv("CLOB_API_SECRET")
 API_PASSPHRASE = os.getenv("CLOB_API_PASSPHRASE")
+SIGNATURE_TYPE = int(os.getenv("CLOB_SIGNATURE_TYPE", "0"))  # 0=EOA (default), 1=Proxy, 2=Gnosis Safe
 
 # --- ENDPOINTS ---
 REST_URL = "https://clob.polymarket.com"
 WS_URL = "wss://ws-live-data.polymarket.com"
+
+# --- MODES ---
+PAPER_TRADING = os.getenv("PAPER_TRADING", "false").lower() == "true"
 
 # --- POLYGON CHAIN ---
 CHAIN_ID = 137
@@ -45,19 +49,19 @@ BA_ABORT_BUNDLE_COST = float(os.getenv("BA_ABORT_BUNDLE_COST", "0.995"))   # Tig
 # Position Balance (winners avg 7.6% imbalance, losers 28.3%)
 BA_MAX_IMBALANCE = float(os.getenv("BA_MAX_IMBALANCE", "0.10"))          # Max 10% difference YES vs NO
 BA_MIN_POSITION_SIZE = float(os.getenv("BA_MIN_POSITION_SIZE", "100"))   # Don't bother with tiny positions
-BA_MAX_TOTAL_EXPOSURE = float(os.getenv("BA_MAX_TOTAL_EXPOSURE", "2000")) # Max capital at risk
+BA_MAX_TOTAL_EXPOSURE = float(os.getenv("BA_MAX_TOTAL_EXPOSURE", "50"))   # Max capital at risk (kept very small for tests)
 
 # Entry Price Thresholds (WIDENED based on actual price ranges $0.09-$0.91)
 BA_MAX_YES_PRICE = float(os.getenv("BA_MAX_YES_PRICE", "0.92"))          # He pays up to ~0.91 on strong side
 BA_MAX_NO_PRICE = float(os.getenv("BA_MAX_NO_PRICE", "0.30"))            # Require a cheap hedge leg (observed 0.02-0.29)
 BA_CHEAP_SIDE_THRESHOLD = float(os.getenv("BA_CHEAP_SIDE_THRESHOLD", "0.30"))  # Default stays strict; override in .env for A/B
 
-# Execution (avg 16.8 fills per transaction - AGGRESSIVE multi-fill)
-BA_SWEEP_BURST_SIZE = int(os.getenv("BA_SWEEP_BURST_SIZE", "20"))        # Orders per burst wave
+# Execution (tiny, impulsive bursts)
+BA_SWEEP_BURST_SIZE = int(os.getenv("BA_SWEEP_BURST_SIZE", "4"))         # Orders per burst wave
 BA_SWEEP_INTERVAL_MS = float(os.getenv("BA_SWEEP_INTERVAL_MS", "5"))     # Was 10ms, faster execution
-BA_ORDER_SIZE = float(os.getenv("BA_ORDER_SIZE", "16"))                  # Confirmed 16 shares standard
+BA_ORDER_SIZE = float(os.getenv("BA_ORDER_SIZE", "5"))                   # Small clip size
 BA_MIN_ORDER_VALUE = float(os.getenv("BA_MIN_ORDER_VALUE", "1.0"))       # Minimum $1 per order
-BA_FILLS_PER_SWEEP = int(os.getenv("BA_FILLS_PER_SWEEP", "17"))          # Target ~16.8 fills (from VWAP analysis)
+BA_FILLS_PER_SWEEP = int(os.getenv("BA_FILLS_PER_SWEEP", "2"))           # Very small burst for testing
 
 # Time-based scoring (early morning markets have better arbitrage)
 BA_MORNING_BONUS_START = int(os.getenv("BA_MORNING_BONUS_START", "9"))   # UTC hour start
@@ -66,6 +70,17 @@ BA_MORNING_BONUS_MULT = float(os.getenv("BA_MORNING_BONUS_MULT", "1.1")) # 10% s
 
 # Enable/disable bundle arbitrage
 ENABLE_BUNDLE_ARBITRAGE = os.getenv("ENABLE_BUNDLE_ARBITRAGE", "true").lower() == "true"
+
+# Bid-side burst / depth-aware knobs (gabagool-style bursts)
+BA_BID_BUNDLE_THRESHOLD = float(os.getenv("BA_BID_BUNDLE_THRESHOLD", "0.995"))  # trigger if bid_yes+bid_no below this
+BA_SPREAD_MIN = float(os.getenv("BA_SPREAD_MIN", "0.01"))                       # require at least this spread on each leg
+BA_DEPTH_MIN = float(os.getenv("BA_DEPTH_MIN", "5"))                            # min depth (shares) at touch per leg
+BA_CHEAP_YES_BID = float(os.getenv("BA_CHEAP_YES_BID", "0.45"))                 # one-sided cheapness trigger (YES)
+BA_CHEAP_NO_BID = float(os.getenv("BA_CHEAP_NO_BID", "0.45"))                   # one-sided cheapness trigger (NO)
+
+# Clip ladder & burst size (small, impulsive clips)
+BA_CLIP_LADDER = tuple(float(x) for x in os.getenv("BA_CLIP_LADDER", "3,4,5,10").split(","))
+BA_BURST_CHILD_COUNT = int(os.getenv("BA_BURST_CHILD_COUNT", "1"))             # orders per trigger burst (pairs or singles)
 
 # --- DIRECTIONAL MAKER (new defaults) ---
 DM_LEVELS = int(os.getenv("DM_LEVELS", "5"))               # ladder levels

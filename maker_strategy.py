@@ -16,8 +16,11 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 from config import (
-    PRIVATE_KEY, POLYGON_ADDRESS,
-    BTC_SLUG_PREFIX, ETH_SLUG_PREFIX,
+    PRIVATE_KEY,
+    POLYGON_ADDRESS,
+    SIGNATURE_TYPE,
+    BTC_SLUG_PREFIX,
+    ETH_SLUG_PREFIX,
     WS_URL,
     CHAIN_ID,
     RPC_URL,
@@ -152,7 +155,7 @@ class MakerStrategy:
             key=PRIVATE_KEY,
             chain_id=POLYGON,
             funder=POLYGON_ADDRESS,
-            signature_type=2,
+            signature_type=SIGNATURE_TYPE,
         )
         creds = self.clob_client.create_or_derive_api_creds()
         self.clob_client.set_api_creds(creds)
