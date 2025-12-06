@@ -181,8 +181,85 @@ def get_target_markets(
         if result:
             return filter_excluded(result)
 
-    # 2. Predict slug based on America/New_York 15-min candles
-    print(f"{tag} 🔮 Predicting current 15m market slug (America/New_York)...")
+    # 2. Gamma Search (Robust Discovery)
+    print(f"{tag} 🔍 Searching Gamma for active 15m markets...")
+    try:
+        session = get_http_session()
+        
+        # Search for '15m' markets in Gamma
+        # We sort by startDate ascending to find the nearest active ones
+        params = {
+            "limit": 20,
+            "active": "true",
+            "closed": "false",
+            "order": "startDate",
+            "ascending": "true", 
+            "q": "15m"
+        }
+        
+        resp = session.get(GAMMA_URL, params=params)
+        if resp.status_code == 200:
+            events = resp.json()
+            candidates = []
+            
+            for event in events:
+                title = event.get("title", "")
+                slug = event.get("slug", "")
+                
+                # Check if this event matches our asset label (BTC or ETH)
+                # e.g. "Bitcoin Up or Down"
+                is_asset_match = False
+                if asset_label == "BTC" and ("btc" in slug or "bitcoin" in title.lower()):
+                    is_asset_match = True
+                elif asset_label == "ETH" and ("eth" in slug or "ethereum" in title.lower()):
+                    is_asset_match = True
+                    
+                if not is_asset_match:
+                    continue
+                
+                # Must contain 15m in slug or title
+                if "15m" not in slug and "15m" not in title:
+                    continue
+                    
+                markets = event.get("markets", [])
+                if not markets:
+                    continue
+                    
+                # Found a candidate!
+                m = markets[0]
+                candidates.append({
+                    "market_slug": m.get("slug") or slug,
+                    "condition_id": m.get("conditionId") or m.get("condition_id"),
+                    "question": m.get("question") or title,
+                    "end_date_iso": m.get("endDate") or event.get("endDate")
+                })
+            
+            candidates = filter_excluded(candidates)
+            
+            # Sort by end date to get the one expiring soonest (current window)
+            # But ensure it's in the future
+            now = datetime.now(timezone.utc)
+            valid_candidates = []
+            for c in candidates:
+                try:
+                    end = dateutil.parser.isoparse(c["end_date_iso"])
+                    if end > now:
+                        valid_candidates.append(c)
+                except:
+                    pass
+            
+            valid_candidates.sort(key=lambda x: x["end_date_iso"])
+            
+            if valid_candidates:
+                best = valid_candidates[0]
+                print(f"{tag} 🎯 Gamma search found: {best.get('question')} (ID: {best.get('condition_id')[:10]}...)")
+                return [best]
+                
+    except Exception as e:
+        print(f"{tag} Gamma search error: {e}")
+
+    # 3. Predict slug based on America/New_York 15-min candles (Fallback)
+    print(f"{tag} 🔮 Predicting current 15m market slug (Fallback)...")
     try:
         now_est = datetime.now(EASTERN)
         slot_minutes = (now_est.minute // 15) * 15

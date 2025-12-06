@@ -38,7 +38,7 @@ from config import (
     ENABLE_BUNDLE_ARBITRAGE,
     BA_MAX_BUNDLE_COST, BA_TARGET_BUNDLE_COST, BA_ABORT_BUNDLE_COST,
     BA_MAX_IMBALANCE, BA_MAX_TOTAL_EXPOSURE,
-    BA_MAX_YES_PRICE, BA_MAX_NO_PRICE,
+    BA_MAX_YES_PRICE, BA_MAX_NO_PRICE, BA_CHEAP_SIDE_THRESHOLD,
     BA_SWEEP_BURST_SIZE, BA_SWEEP_INTERVAL_MS, BA_ORDER_SIZE,
     BA_MORNING_BONUS_START, BA_MORNING_BONUS_END, BA_MORNING_BONUS_MULT,
     BA_FILLS_PER_SWEEP,
@@ -119,7 +119,11 @@ class MarketState:
         self.has_liquidity = yes_ok or no_ok
         
         # Check arbitrage opportunity (the key metric!)
-        self.has_arbitrage = self.bundle_cost < BA_MAX_BUNDLE_COST
+        cheap_side = min(self.best_ask_yes, self.best_ask_no)
+        self.has_arbitrage = (
+            self.bundle_cost < BA_MAX_BUNDLE_COST
+            and cheap_side <= BA_CHEAP_SIDE_THRESHOLD
+        )
     
     def to_orderbook_state(self) -> OrderBookState:
         """Convert to OrderBookState for BundleArbitrageur"""
@@ -209,6 +213,7 @@ class MarketHopper:
             max_total_exposure=BA_MAX_TOTAL_EXPOSURE,
             max_yes_price=BA_MAX_YES_PRICE,
             max_no_price=BA_MAX_NO_PRICE,
+            cheap_side_threshold=BA_CHEAP_SIDE_THRESHOLD,
             order_size=BA_ORDER_SIZE,
             sweep_burst_size=BA_SWEEP_BURST_SIZE,
             sweep_interval_ms=BA_SWEEP_INTERVAL_MS,
@@ -269,9 +274,19 @@ class MarketHopper:
         # Secondary: Are individual prices within our thresholds?
         yes_ok = 1.0 if market.best_ask_yes <= BA_MAX_YES_PRICE else 0.5
         no_ok = 1.0 if market.best_ask_no <= BA_MAX_NO_PRICE else 0.5
+        cheap_side = min(market.best_ask_yes, market.best_ask_no)
+        cheap_bonus = 0.0
+        if cheap_side < BA_CHEAP_SIDE_THRESHOLD:
+            cheap_bonus = (BA_CHEAP_SIDE_THRESHOLD - cheap_side) / BA_CHEAP_SIDE_THRESHOLD
+            cheap_bonus = min(1.0, max(0.0, cheap_bonus))
         
         # Weighted score
-        score = bundle_score * 0.7 + (yes_ok * 0.15) + (no_ok * 0.15)
+        score = (
+            bundle_score * 0.6
+            + (yes_ok * 0.1)
+            + (no_ok * 0.1)
+            + (cheap_bonus * 0.2)
+        )
         
         # Apply time-based bonus (early morning = better spreads)
         time_bonus = self._get_time_bonus()
@@ -576,6 +591,11 @@ class MarketHopper:
             )
 
         self.last_ws_update[label] = time.time()
+        
+        # 🚀 REACTIVE TRADING: Execute immediately if arbitrage detected
+        # This removes the 0.5s polling lag
+        if market.has_arbitrage and self.current_focus == label:
+             asyncio.create_task(self.execute_bundle_arbitrage())
 
         # Opportunistically check resolution occasionally (no more than once every 60s per market)
         now = time.time()
@@ -796,16 +816,6 @@ class MarketHopper:
                 
                 if time_remaining < 30:
                     print(f"[Hopper] ⚠️ {label} market expires in {time_remaining:.0f}s")
-                    if ENABLE_ONCHAIN_REDEEM and  and self.arbitrageur:
-                        try:
-                            winner_idx = int()
-                            asyncio.create_task(
-                                self.arbitrageur.redeem_winning_tokens(
-                                    market.condition_id, [winner_idx]
-                                )
-                            )
-                        except Exception as e:
-                            print(f"[Hopper] ⚠️ Redemption enqueue failed: {e}")
                     return True
                     
             except Exception as e:

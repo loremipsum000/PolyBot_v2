@@ -61,8 +61,9 @@ class BundleConfig:
     
     # Entry Price Thresholds (WIDENED based on actual price ranges)
     # Gabagool22 buys Up $0.09-$0.91, Down $0.11-$0.89
-    max_yes_price: float = 0.85         # Was 0.75, widened
-    max_no_price: float = 0.45          # Was 0.35, widened
+    max_yes_price: float = 0.92         # He pays up to ~0.91 on strong side
+    max_no_price: float = 0.30          # Require cheap hedge leg
+    cheap_side_threshold: float = 0.30  # Require at least one side at/under this
     
     # Execution (avg 16.8 fills per transaction - AGGRESSIVE multi-fill)
     order_size: float = 16              # Confirmed 16 shares standard
@@ -354,6 +355,11 @@ class BundleCostCalculator:
         if not self.current.has_liquidity:
             return False, "No liquidity"
         
+        # Require at least one cheap side to mirror gabagool2's pattern
+        cheap_side = min(self.current.best_ask_yes, self.current.best_ask_no)
+        if cheap_side > self.config.cheap_side_threshold:
+            return False, f"Cheapest side ${cheap_side:.3f} > cheap threshold ${self.config.cheap_side_threshold}"
+        
         # Check individual price thresholds
         if self.current.best_ask_yes > self.config.max_yes_price:
             return False, f"YES ask ${self.current.best_ask_yes:.3f} > max ${self.config.max_yes_price}"
@@ -611,7 +617,7 @@ class DualSideSweeper:
         order_size = self.config.order_size  # 16 shares
         
         # Calculate size per fill to achieve ~17 fills while maintaining volume
-        size_per_order = max(1, order_size / 2)  # Smaller orders = more fills
+        size_per_order = max(1, order_size)  # Match observed 16-share clips
         
         # Get balanced sizes based on current position
         base_yes, base_no = balancer.get_balanced_order_sizes(
