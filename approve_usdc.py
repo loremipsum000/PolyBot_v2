@@ -21,12 +21,23 @@ except ImportError:
 load_dotenv()
 
 # Local config values; fallback to env if config not present
-try:
-    from config import RPC_URL, CHAIN_ID, PRIVATE_KEY
-except Exception:
-    RPC_URL = os.getenv("RPC_URL") or os.getenv("ALCHEMY_RPC_URL")
-    CHAIN_ID = int(os.getenv("CHAIN_ID") or "137")
-    PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+# Prefer explicit env; fall back to config if present and populated
+env_rpc = os.getenv("RPC_URL") or os.getenv("ALCHEMY_RPC_URL")
+env_chain = os.getenv("CHAIN_ID")
+env_pk = os.getenv("PRIVATE_KEY")
+
+RPC_URL = env_rpc
+CHAIN_ID = int(env_chain) if env_chain else 137
+PRIVATE_KEY = env_pk
+
+if not RPC_URL or not PRIVATE_KEY:
+    try:
+        from config import RPC_URL as CFG_RPC, CHAIN_ID as CFG_CHAIN_ID, PRIVATE_KEY as CFG_PK
+        RPC_URL = RPC_URL or CFG_RPC
+        CHAIN_ID = CHAIN_ID or CFG_CHAIN_ID
+        PRIVATE_KEY = PRIVATE_KEY or CFG_PK
+    except Exception:
+        pass
 
 if not RPC_URL or not PRIVATE_KEY:
     raise SystemExit("RPC_URL and PRIVATE_KEY are required.")
