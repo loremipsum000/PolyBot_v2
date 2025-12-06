@@ -71,7 +71,8 @@ def main():
     )
 
     signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    raw = getattr(signed, "rawTransaction", None) or signed.raw_transaction
+    tx_hash = w3.eth.send_raw_transaction(raw)
     print(f"✅ Approval submitted. Tx: {tx_hash.hex()}")
 
 
