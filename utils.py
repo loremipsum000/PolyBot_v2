@@ -181,82 +181,122 @@ def get_target_markets(
         if result:
             return filter_excluded(result)
 
-    # 2. Gamma Search (Robust Discovery)
+    # 2. Gamma Search (Robust Discovery) - IMPROVED for 15-minute windows
     print(f"{tag} 🔍 Searching Gamma for active 15m markets...")
     try:
         session = get_http_session()
+        now = datetime.now(timezone.utc)
         
-        # Search for '15m' markets in Gamma
-        # We sort by startDate ascending to find the nearest active ones
-        params = {
-            "limit": 20,
-            "active": "true",
-            "closed": "false",
-            "order": "startDate",
-            "ascending": "true", 
-            "q": "15m"
-        }
+        # Calculate current 15-minute window boundaries
+        # Markets should expire within the next 20 minutes max
+        max_end_time = now + timedelta(minutes=20)
+        min_end_time = now  # Must not be expired
         
-        resp = session.get(GAMMA_URL, params=params)
-        if resp.status_code == 200:
+        # Search for '15m up down' markets in Gamma
+        # Try multiple search queries to find the right market
+        search_queries = [
+            f"{asset_label.lower()} up down 15m",  # "btc up down 15m"
+            f"{asset_label.lower()} updown 15m",   # "btc updown 15m"
+            "up or down 15m",                       # Generic
+        ]
+        
+        candidates = []
+        
+        for query in search_queries:
+            if candidates:
+                break
+                
+            params = {
+                "limit": 50,
+                "active": "true",
+                "closed": "false",
+                "order": "endDate",
+                "ascending": "true",
+            }
+            
+            resp = session.get(GAMMA_URL, params=params)
+            if resp.status_code != 200:
+                continue
+                
             events = resp.json()
-            candidates = []
             
             for event in events:
-                title = event.get("title", "")
-                slug = event.get("slug", "")
+                title = event.get("title", "").lower()
+                slug = event.get("slug", "").lower()
                 
                 # Check if this event matches our asset label (BTC or ETH)
-                # e.g. "Bitcoin Up or Down"
                 is_asset_match = False
-                if asset_label == "BTC" and ("btc" in slug or "bitcoin" in title.lower()):
+                if asset_label == "BTC" and ("btc" in slug or "bitcoin" in title):
                     is_asset_match = True
-                elif asset_label == "ETH" and ("eth" in slug or "ethereum" in title.lower()):
+                elif asset_label == "ETH" and ("eth" in slug or "ethereum" in title):
                     is_asset_match = True
                     
                 if not is_asset_match:
                     continue
                 
-                # Must contain 15m in slug or title
-                if "15m" not in slug and "15m" not in title:
+                # Must contain "15" and ("up" or "down") - this identifies 15-minute markets
+                is_15m_market = ("15" in slug or "15" in title) and ("up" in title or "down" in title)
+                if not is_15m_market:
                     continue
                     
                 markets = event.get("markets", [])
                 if not markets:
                     continue
                     
-                # Found a candidate!
                 m = markets[0]
+                end_date_str = m.get("endDate") or event.get("endDate")
+                
+                # Validate this is the CURRENT window (expires within 20 minutes)
+                try:
+                    end_date = dateutil.parser.isoparse(end_date_str)
+                    if end_date <= min_end_time:
+                        print(f"{tag} ⏭️ Skipping expired: {title[:40]}... (ended {end_date})")
+                        continue
+                    if end_date > max_end_time:
+                        print(f"{tag} ⏭️ Skipping future: {title[:40]}... (ends {end_date})")
+                        continue
+                except Exception:
+                    continue
+                
+                # Verify market exists on CLOB and is accepting orders
+                cond_id = m.get("conditionId") or m.get("condition_id")
+                if cond_id:
+                    try:
+                        clob_resp = session.get(f"{REST_URL}/markets/{cond_id}", timeout=5)
+                        if clob_resp.status_code == 404:
+                            print(f"{tag} ⏭️ Skipping 404: {cond_id[:20]}...")
+                            continue
+                        if clob_resp.status_code == 200:
+                            clob_data = clob_resp.json()
+                            if not clob_data.get("accepting_orders", True):
+                                print(f"{tag} ⏭️ Skipping not accepting: {cond_id[:20]}...")
+                                continue
+                    except Exception:
+                        continue
+                    
+                # Found a valid current-window candidate!
                 candidates.append({
                     "market_slug": m.get("slug") or slug,
-                    "condition_id": m.get("conditionId") or m.get("condition_id"),
-                    "question": m.get("question") or title,
-                    "end_date_iso": m.get("endDate") or event.get("endDate")
+                    "condition_id": cond_id,
+                    "question": m.get("question") or event.get("title"),
+                    "end_date_iso": end_date_str
                 })
+                print(f"{tag} ✅ Found current window: {event.get('title')[:50]}... (ends {end_date_str})")
             
-            candidates = filter_excluded(candidates)
-            
-            # Sort by end date to get the one expiring soonest (current window)
-            # But ensure it's in the future
-            now = datetime.now(timezone.utc)
-            valid_candidates = []
-            for c in candidates:
-                try:
-                    end = dateutil.parser.isoparse(c["end_date_iso"])
-                    if end > now:
-                        valid_candidates.append(c)
-                except:
-                    pass
-            
-            valid_candidates.sort(key=lambda x: x["end_date_iso"])
-            
-            if valid_candidates:
-                best = valid_candidates[0]
-                print(f"{tag} 🎯 Gamma search found: {best.get('question')} (ID: {best.get('condition_id')[:10]}...)")
-                return [best]
+        candidates = filter_excluded(candidates)
+        
+        # Sort by end date to get the one expiring soonest (current window)
+        candidates.sort(key=lambda x: x.get("end_date_iso", ""))
+        
+        if candidates:
+            best = candidates[0]
+            print(f"{tag} 🎯 Gamma search found: {best.get('question')} (ID: {best.get('condition_id')[:16]}...)")
+            return [best]
                 
     except Exception as e:
         print(f"{tag} Gamma search error: {e}")
+        import traceback
+        traceback.print_exc()
 
     # 3. Predict slug based on America/New_York 15-min candles (Fallback)
     print(f"{tag} 🔮 Predicting current 15m market slug (Fallback)...")
