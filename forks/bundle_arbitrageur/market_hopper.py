@@ -66,6 +66,7 @@ from config import (
 )
 from utils import get_target_markets, warm_connections
 from binance_client import BinanceFeed
+from phase_manager import PhaseManager
 from trade_logger import TradeLogger
 from bundle_arbitrageur import (
     BundleArbitrageur, BundleConfig, OrderBookState, Position
@@ -227,6 +228,9 @@ class MarketHopper:
         # External spot feed (Binance futures bookTicker mid)
         self.binance_feed: Optional[BinanceFeed] = BinanceFeed()
         self._binance_task: Optional[asyncio.Task] = None
+
+        # Phase manager for time-aware controls
+        self.phase_manager: Optional[PhaseManager] = None
         
         # Concurrency guard for reactive execution
         self._sweep_in_flight: bool = False
@@ -424,6 +428,7 @@ class MarketHopper:
         
         # Update arbitrageur with new market tokens
         market = self.markets[new_focus]
+        self.phase_manager = PhaseManager(market.end_date_iso, self.binance_feed)
         if self.arbitrageur:
             self.arbitrageur.set_market(
                 market.yes_token,
@@ -431,6 +436,7 @@ class MarketHopper:
                 market.slug,
                 market.condition_id,
             )
+            self.arbitrageur.set_phase_manager(self.phase_manager)
         
         # Update state
         self.current_focus = new_focus

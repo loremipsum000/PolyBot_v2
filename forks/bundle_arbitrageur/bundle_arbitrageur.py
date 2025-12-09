@@ -65,6 +65,7 @@ from config import (
     BA_MORNING_BONUS_END,
     BA_MORNING_BONUS_MULT,
 )
+from phase_manager import PhaseManager
 from chain_client import CTFSettlementClient
 from trade_logger import TradeLogger
 
@@ -606,153 +607,45 @@ class DualSideSweeper:
             if "min" not in err.lower() and "403" not in err:
                 print(f"[Sweeper] Order error: {e}")
             return None, None, 0.0
-    
-    async def sweep_both_sides(
+
+    async def vacuum_level(
         self,
-        yes_token: str,
-        no_token: str,
-        book: OrderBookState,
+        side: str,
+        token_id: str,
+        price: float,
+        clip_size: float,
         position: Position,
-        balancer: PositionBalancer,
         market_slug: str = "",
         condition_id: str = "",
-        force_panic: bool = False,
-    ) -> Tuple[int, int, float, float]:
+        max_streak: int = 6,
+    ) -> Tuple[int, float]:
         """
-        Execute MULTI-FILL sweep on BOTH YES and NO sides.
-        
-        UPDATED execution pattern (from 25K trade analysis):
-        - Target ~17 fills per sweep (avg 16.8 from gabagool22)
-        - Alternate YES/NO orders to maintain balance
-        - Use smaller order sizes for better fill rates
-        
-        Returns (yes_fills, no_fills, yes_volume, no_volume)
+        Sequentially consume liquidity at a single price level ("machine gun").
+        Returns (fills_count, volume_filled).
         """
-        # Require both sides present
-        if book.best_ask_yes <= 0 or book.best_ask_no <= 0 or not book.has_liquidity:
-            print(f"[Sweeper] ⛔ BLOCKED: Missing/empty book (YES:{book.best_ask_yes} NO:{book.best_ask_no})")
-            return 0, 0, 0.0, 0.0
+        if price <= 0 or price >= 0.99 or clip_size <= 0:
+            return 0, 0.0
 
-        is_panic = force_panic or (position.imbalance > self.config.max_imbalance)
+        fills_count = 0
+        volume_filled = 0.0
 
-        orders_to_place: List[Tuple[str, float, float]] = []
-
-        if is_panic:
-            # Panic hedge: ignore bundle/price caps; hedge only the light side
-            missing_side = "NO" if position.yes_shares > position.no_shares else "YES"
-            hedge_price = book.best_ask_no if missing_side == "NO" else book.best_ask_yes
-            if hedge_price <= 0 or hedge_price >= 0.99:
-                print(f"[Sweeper] ⚠️ Panic hedge expensive/invalid ({hedge_price:.3f}); waiting")
-                return 0, 0, 0.0, 0.0
-
-            clip_size = self._select_clip(self.config.clip_ladder, book.best_ask_yes_size, book.best_ask_no_size)
-
-            # Panic safety: cap burst notional
-            PANIC_MAX_BURST_VALUE = 500.0
-            est_burst_value = clip_size * hedge_price * self.config.burst_child_count
-            if est_burst_value > PANIC_MAX_BURST_VALUE:
-                safe_count = max(1, int(PANIC_MAX_BURST_VALUE // max(1e-9, clip_size * hedge_price)))
-                target_pairs = safe_count
-            else:
-                target_pairs = max(1, self.config.burst_child_count)
-
-            orders_to_place = [(missing_side, hedge_price, clip_size)] * target_pairs
-            print(f"[Sweeper] 🚨 PANIC: Firing {target_pairs}x {missing_side} @ ${hedge_price:.3f}")
-
-        else:
-            # Normal bundle entry with caps
-            bundle_cost = book.best_ask_yes + book.best_ask_no
-            if bundle_cost > self.config.max_bundle_cost:
-                print(f"[Sweeper] ⛔ BLOCKED: Bundle ${bundle_cost:.3f} > max ${self.config.max_bundle_cost:.3f}")
-                return 0, 0, 0.0, 0.0
-
-            yes_price = min(book.best_ask_yes, self.config.max_yes_price)
-            no_price = min(book.best_ask_no, self.config.max_no_price)
-            if yes_price > self.config.max_yes_price or no_price > self.config.max_no_price:
-                print(f"[Sweeper] ⛔ BLOCKED: Price cap exceeded (YES:{yes_price:.3f}>{self.config.max_yes_price:.3f} or NO:{no_price:.3f}>{self.config.max_no_price:.3f})")
-                return 0, 0, 0.0, 0.0
-
-            profit_potential = 1.00 - bundle_cost
-            print(f"[Sweeper] ✅ ENTERING: Bundle ${bundle_cost:.3f} (profit potential ${profit_potential:.3f}/pair)")
-
-            clip_size = self._select_clip(self.config.clip_ladder, book.best_ask_yes_size, book.best_ask_no_size)
-            base_yes, base_no = balancer.get_balanced_order_sizes(
-                position, book, clip_size
+        for _ in range(max_streak):
+            order_id, status, filled_size = await self.place_order(
+                token_id,
+                side,
+                price,
+                clip_size,
+                market_slug,
+                condition_id,
             )
-
-            target_pairs = max(1, self.config.burst_child_count)
-            # Apply exposure cap only in standard mode
-            pair_notional = (yes_price + no_price) * min(base_yes, base_no)
-            remaining_exposure = max(0.0, self.config.max_total_exposure - position.total_exposure)
-            if pair_notional > 0:
-                max_pairs_by_cap = max(1, int(remaining_exposure // pair_notional))
-                target_pairs = min(target_pairs, max_pairs_by_cap)
-
-            start_side = 'NO' if position.yes_shares > position.no_shares else 'YES'
-            for _ in range(target_pairs):
-                if start_side == 'YES':
-                    orders_to_place.append(('YES', yes_price, base_yes))
-                    orders_to_place.append(('NO', no_price, base_no))
-                else:
-                    orders_to_place.append(('NO', no_price, base_no))
-                    orders_to_place.append(('YES', yes_price, base_yes))
-        
-        if not orders_to_place:
-            return 0, 0, 0.0, 0.0
-        
-        # Execute all orders concurrently for speed, but yield between shots
-        async def _execute_order(side, price, size):
-            token_id = yes_token if side == 'YES' else no_token
-            result = await self.place_order(
-                token_id, side, price, size, market_slug, condition_id
-            )
-            # Yield back to event loop so WS tasks can process diffs
+            # Yield to the event loop to avoid WS starvation
             await asyncio.sleep(GABA_BURST_DELAY)
-            return (side, result)
-        
-        tasks = [_execute_order(side, price, size) for side, price, size in orders_to_place]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
-        yes_fills_count = 0
-        no_fills_count = 0
-        yes_volume = 0.0
-        no_volume = 0.0
-        
-        for result in results:
-            if isinstance(result, Exception):
-                continue
-            
-            side, (order_id, status, filled_size) = result
-            if status == 'matched' and filled_size > 0:
-                if side == 'YES':
-                    yes_fills_count += 1
-                    yes_volume += filled_size
-                    price = yes_price
-                else:
-                    no_fills_count += 1
-                    no_volume += filled_size
-                    price = no_price
-                
-                # Update position
+
+            if status == "matched" and filled_size > 0:
+                fills_count += 1
+                volume_filled += filled_size
                 position.update_from_fill(side, price, filled_size)
-                
-                # Log per-fill event
-                token_for_log = yes_token if side == 'YES' else no_token
-                self.logger.log_order_placed(
-                    market_slug=market_slug,
-                    condition_id=condition_id,
-                    token_id=token_for_log,
-                    outcome='Up' if side == 'YES' else 'Down',
-                    side='BUY',
-                    price=price,
-                    size=float(filled_size),
-                    order_id=order_id or "unknown",
-                    status=status,
-                    market_context={'bundle_arbitrage': True, 'multi_fill': True},
-                )
-                self.logger.update_position_from_fill('Up' if side == 'YES' else 'Down', 'BUY', price, float(filled_size))
-                # JSON event log for analysis
+
                 if self.event_logger:
                     self.event_logger.log({
                         "event_type": "fill",
@@ -762,6 +655,7 @@ class DualSideSweeper:
                         "price": price,
                         "size": float(filled_size),
                         "order_id": order_id,
+                        "mode": "vacuum_level",
                         "position": {
                             "yes_shares": position.yes_shares,
                             "no_shares": position.no_shares,
@@ -769,16 +663,10 @@ class DualSideSweeper:
                             "imbalance": position.imbalance,
                         },
                     })
-        
-        # Track fills per sweep for analysis
-        total_fills = yes_fills_count + no_fills_count
-        self.sweep_fill_counts.append(total_fills)
-        
-        if total_fills > 0:
-            avg_fills = sum(self.sweep_fill_counts) / len(self.sweep_fill_counts)
-            print(f"[Sweeper] Multi-fill: {total_fills} fills this sweep (avg: {avg_fills:.1f})")
-        
-        return yes_fills_count, no_fills_count, yes_volume, no_volume
+            else:
+                break
+
+        return fills_count, volume_filled
 
     async def sweep_one_side(
         self,
@@ -880,6 +768,7 @@ class BundleArbitrageur:
         self.position = Position()
         self.sweeper: Optional[DualSideSweeper] = None
         self.settlement_client: Optional[CTFSettlementClient] = None
+        self.phase_manager: Optional[PhaseManager] = None
         
         # CLOB client
         self.clob_client: Optional[ClobClient] = None
@@ -930,6 +819,10 @@ class BundleArbitrageur:
         print(f"[BundleArb] 🎯 Market set: {market_slug[:40]}...")
         print(f"[BundleArb]    YES: {yes_token[:20]}...")
         print(f"[BundleArb]    NO:  {no_token[:20]}...")
+
+    def set_phase_manager(self, phase_manager: Optional[PhaseManager]):
+        """Attach a PhaseManager for time/phase-aware controls."""
+        self.phase_manager = phase_manager
     
     def update_book(self, book: OrderBookState):
         """Update orderbook state"""
@@ -950,27 +843,30 @@ class BundleArbitrageur:
         book = self.calculator.current
         if not book:
             return False
-        
+
+        # Phase-aware thresholds
+        phase_snapshot = self.phase_manager.get_current_phase() if self.phase_manager else None
+        phase_cfg = phase_snapshot.config if phase_snapshot else {}
+        max_imbalance_allowed = phase_cfg.get("max_imbalance", self.config.max_imbalance)
+        force_unwind = phase_cfg.get("force_unwind", False)
+
         # Check trigger (bundle only; cheap-side removed)
         action, reason = self.calculator.get_trigger_action()
         should_enter = action is not None
-        
-        # Also check abort condition
+
+        # Abort and exposure gates
         should_abort, abort_reason = self.calculator.should_abort()
-        is_imbalanced = self.position.imbalance > self.config.max_imbalance
-        
-        # Abort only when balanced
+        is_imbalanced = self.position.imbalance > max_imbalance_allowed
+
         if should_abort and not is_imbalanced:
-            if self.sweeps_executed > 0:  # Only log if we were trading
+            if self.sweeps_executed > 0:
                 print(f"[BundleArb] 🛑 ABORT: {abort_reason}")
             return False
-        
-        # Exposure cap only when balanced
+
         if not is_imbalanced and self.position.total_exposure >= self.config.max_total_exposure:
             self._log_state(f"⚠️ Max exposure ${self.position.total_exposure:.2f} reached")
             return False
-        
-        # Entry gate: if not panic and no trigger, skip
+
         if not should_enter and not is_imbalanced:
             self.sweeps_skipped += 1
             now = time.time()
@@ -978,15 +874,29 @@ class BundleArbitrageur:
                 self._log_state(f"⏸️ Waiting: {reason}")
                 self.last_log_time = now
             return False
-        
-        # Force panic action when imbalanced but no trigger
-        if is_imbalanced and not should_enter:
-            action = "PANIC"
-            reason = f"Forcing hedge for {self.position.imbalance*100:.1f}% imbalance"
-        
-        # EXECUTE SWEEP!
-        print(f"[BundleArb] 🎯 SWEEP {action}! BidBundle=${book.bundle_cost_bid:.3f} AskBundle=${book.bundle_cost_ask:.3f}")
-        # Log sweep attempt with current state
+
+        # Panic/force unwind overrides trigger
+        mode = "PANIC" if is_imbalanced and not should_enter else (action or "LEAN")
+        if force_unwind and is_imbalanced:
+            mode = "UNWIND"
+            reason = f"Force unwind > {max_imbalance_allowed:.2f} imbalance"
+
+        # Pick side to lean (sequential)
+        if mode in ("PANIC", "UNWIND"):
+            target_side = "NO" if self.position.yes_shares > self.position.no_shares else "YES"
+        else:
+            target_side = "YES" if book.best_ask_yes <= book.best_ask_no else "NO"
+
+        target_token = self.yes_token if target_side == "YES" else self.no_token
+        target_price = book.best_ask_yes if target_side == "YES" else book.best_ask_no
+        target_depth = book.best_ask_yes_size if target_side == "YES" else book.best_ask_no_size
+
+        if target_price <= 0 or target_price >= 0.99 or target_depth <= 0:
+            return False
+
+        clip_size = self.sweeper._select_clip(self.config.clip_ladder, target_depth)
+
+        # Log sweep attempt
         self.event_logger.log({
             "event_type": "sweep_attempt",
             "market_slug": self.market_slug,
@@ -1004,37 +914,32 @@ class BundleArbitrageur:
                 "imbalance": self.position.imbalance,
             },
             "reason": reason,
-            "action": action,
+            "action": mode,
+            "target_side": target_side,
+            "phase": phase_snapshot.name if phase_snapshot else "unknown",
         })
-        
-        if action in ("bundle", "PANIC"):
-            yes_fills, no_fills, yes_vol, no_vol = await self.sweeper.sweep_both_sides(
-                self.yes_token,
-                self.no_token,
-                book,
-                self.position,
-                self.balancer,
-                self.market_slug,
-                self.condition_id,
-                force_panic=(action == "PANIC"),
-            )
-        else:
-            return False
-        
+
+        fills_count, volume = await self.sweeper.vacuum_level(
+            target_side,
+            target_token,
+            target_price,
+            clip_size,
+            self.position,
+            self.market_slug,
+            self.condition_id,
+            max_streak=self.config.burst_child_count,
+        )
+
         self.sweeps_executed += 1
-        total_fills = yes_fills + no_fills
-        
-        if total_fills > 0:
-            # Log sweep result
+        if fills_count > 0:
             self.event_logger.log({
                 "event_type": "sweep_result",
                 "market_slug": self.market_slug,
                 "condition_id": self.condition_id,
                 "bundle_cost": book.bundle_cost_ask,
-                "yes_fills": yes_fills,
-                "no_fills": no_fills,
-                "yes_volume": yes_vol,
-                "no_volume": no_vol,
+                "fills": fills_count,
+                "volume": volume,
+                "target_side": target_side,
                 "position": {
                     "yes_shares": self.position.yes_shares,
                     "no_shares": self.position.no_shares,
@@ -1043,9 +948,9 @@ class BundleArbitrageur:
                 },
             })
             
-            self._log_state(f"✅ Sweep #{self.sweeps_executed}: {yes_fills}Y/{no_fills}N fills, {yes_vol:.0f}/{no_vol:.0f} vol")
+            self._log_state(f"✅ Sweep #{self.sweeps_executed}: {fills_count} fills on {target_side} vol {volume:.0f}")
             return True
-        
+
         return False
     
     def _log_state(self, prefix: str = ""):
