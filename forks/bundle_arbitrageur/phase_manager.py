@@ -2,30 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-# Phase configuration driven by time-to-expiry
-PHASE_CONFIG: Dict[str, Dict] = {
-    # > 10 minutes remaining
-    "FORMATION": {
-        "max_imbalance": 150.0,
-        "aggression": "MEDIUM",
-        "force_unwind": False,
-        "use_spot": True,
-    },
-    # 3-10 minutes remaining
-    "GRIND": {
-        "max_imbalance": 300.0,
-        "aggression": "HIGH",
-        "force_unwind": False,
-        "use_spot": False,
-    },
-    # < 3 minutes remaining
-    "RESOLUTION": {
-        "max_imbalance": 30.0,
-        "aggression": "LOW",
-        "force_unwind": True,
-        "use_spot": False,
-    },
-}
+from config import PHASE_CONFIG  # single source of truth
 
 
 @dataclass

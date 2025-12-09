@@ -488,6 +488,7 @@ class DualSideSweeper:
         self.config = config
         self.logger = logger
         self.event_logger = event_logger
+        self.book: Optional[OrderBookState] = None
         
         # Rate limiting
         self.last_order_time: float = 0.0
@@ -630,11 +631,26 @@ class DualSideSweeper:
         volume_filled = 0.0
 
         for _ in range(max_streak):
+            # Refresh live depth/price each shot to avoid stale book usage
+            live_price = price
+            live_depth = clip_size
+            if self.book:
+                if side == "YES":
+                    live_price = self.book.best_ask_yes
+                    live_depth = self.book.best_ask_yes_size
+                else:
+                    live_price = self.book.best_ask_no
+                    live_depth = self.book.best_ask_no_size
+            if live_price <= 0 or live_price >= 0.99 or live_depth <= 0:
+                break
+            use_price = min(price, live_price)  # respect price limit; never pay above initial
+            use_size = min(clip_size, live_depth)
+
             order_id, status, filled_size = await self.place_order(
                 token_id,
                 side,
-                price,
-                clip_size,
+                use_price,
+                use_size,
                 market_slug,
                 condition_id,
             )
@@ -827,6 +843,8 @@ class BundleArbitrageur:
     def update_book(self, book: OrderBookState):
         """Update orderbook state"""
         self.calculator.update(book)
+        if self.sweeper:
+            self.sweeper.book = book
     
     async def execute_sweep(self) -> bool:
         """
@@ -885,7 +903,12 @@ class BundleArbitrageur:
         if mode in ("PANIC", "UNWIND"):
             target_side = "NO" if self.position.yes_shares > self.position.no_shares else "YES"
         else:
-            target_side = "YES" if book.best_ask_yes <= book.best_ask_no else "NO"
+            # Choose the side with the larger discount vs implied
+            implied_yes = 1.00 - book.best_ask_no
+            implied_no = 1.00 - book.best_ask_yes
+            discount_yes = implied_yes - book.best_ask_yes
+            discount_no = implied_no - book.best_ask_no
+            target_side = "YES" if discount_yes >= discount_no else "NO"
 
         target_token = self.yes_token if target_side == "YES" else self.no_token
         target_price = book.best_ask_yes if target_side == "YES" else book.best_ask_no
